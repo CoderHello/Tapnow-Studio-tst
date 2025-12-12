@@ -286,7 +286,14 @@
             if (modelId.includes('grok')) return GROK_VIDEO_RATIOS;
             return RATIOS;
         };
-        const RESOLUTIONS = ['Auto', '1K', '2K', '4K']; 
+        const RESOLUTIONS = ['Auto', '1K', '2K', '4K'];
+        // 根据模型返回不同的分辨率选项
+        const getResolutionsForModel = (modelId) => {
+            if (!modelId) return RESOLUTIONS;
+            // jimeng-4.5模型只显示2K和4K两个选项
+            if (modelId.includes('jimeng-4.5')) return ['2K', '4K'];
+            return RESOLUTIONS;
+        }; 
         // Midjourney版本列表
         const MJ_VERSIONS = [
             { label: 'MJ V7', value: '--v 7' },
@@ -3471,6 +3478,52 @@
                                 console.log('[Async Image] 从 data.data.data 中重新提取到图片（二次尝试）:', images.length, '张');
                             }
                         }
+                        
+                        // 如果任务状态是SUCCESS但还没找到图片，立即执行深度搜索（不等待后续处理）
+                        if (images.length === 0 && (status === 'COMPLETED' || status === 'SUCCESS' || status === 'FINISHED' || status === 'DONE')) {
+                            console.log('[Async Image] 任务状态为成功但图片数量为0，立即执行深度搜索');
+                            // 优化后的深度搜索函数：优先检查常见路径，减少递归深度
+                            const deepSearchForUrl = (obj, depth = 0, visited = new WeakSet()) => {
+                                if (depth > 5) return null; // 防止无限递归
+                                if (!obj || typeof obj !== 'object') return null;
+                                
+                                // 防止循环引用
+                                if (visited.has(obj)) return null;
+                                visited.add(obj);
+                                
+                                // 优先检查当前对象的常见字段（避免不必要的递归）
+                                const urlFields = ['url', 'image_url', 'imageUrl', 'image', 'src', 'link', 'href'];
+                                for (const field of urlFields) {
+                                    if (obj[field] && typeof obj[field] === 'string' && obj[field].startsWith('http')) {
+                                        return obj[field];
+                                    }
+                                }
+                                
+                                // 如果是数组，优先检查第一个元素
+                                if (Array.isArray(obj) && obj.length > 0) {
+                                    const result = deepSearchForUrl(obj[0], depth + 1, visited);
+                                    if (result) return result;
+                                }
+                                
+                                // 递归搜索所有属性（但跳过已检查的常见字段）
+                                for (const key in obj) {
+                                    if (obj.hasOwnProperty(key) && !urlFields.includes(key)) {
+                                        const result = deepSearchForUrl(obj[key], depth + 1, visited);
+                                        if (result) return result;
+                                    }
+                                }
+                                
+                                return null;
+                            };
+                            
+                            const foundUrl = deepSearchForUrl(data);
+                            if (foundUrl) {
+                                images = [{ url: foundUrl }];
+                                console.log('[Async Image] 通过立即深度搜索找到图片URL:', foundUrl);
+                            } else {
+                                console.warn('[Async Image] 深度搜索未找到图片URL，响应数据结构:', JSON.stringify(data, null, 2).substring(0, 500));
+                            }
+                        }
                     }
                     
                     const errorMsg = data?.message || data?.error || data?.fail_reason || '';
@@ -3542,20 +3595,21 @@
                                                 frontendCalculated: durationMs === null ? null : (Date.now() - (hItem.startTime || Date.now()))
                                             });
                                             
-                                            // 更新预览窗口（在setHistory回调外执行，使用保存的sourceNodeId）
+                                            // 更新预览窗口（立即执行，不等待）
                                             // 即使savedSourceNodeId为空，也尝试调用updatePreviewFromTask，它会从history中查找
-                                            setTimeout(() => {
-                                                const nodeIdToUse = savedSourceNodeId || hItem.sourceNodeId;
-                                                console.log('[Async Image] 准备更新预览窗口', { 
-                                                    taskId, 
-                                                    url: primaryUrl, 
-                                                    sourceNodeId: nodeIdToUse, 
-                                                    savedSourceNodeId,
-                                                    hItemSourceNodeId: hItem.sourceNodeId,
-                                                    imageCount: imageUrls.length 
-                                                });
+                                            const nodeIdToUse = savedSourceNodeId || hItem.sourceNodeId;
+                                            console.log('[Async Image] 准备更新预览窗口', { 
+                                                taskId, 
+                                                url: primaryUrl, 
+                                                sourceNodeId: nodeIdToUse, 
+                                                savedSourceNodeId,
+                                                hItemSourceNodeId: hItem.sourceNodeId,
+                                                imageCount: imageUrls.length 
+                                            });
+                                            // 使用requestAnimationFrame确保在下一个渲染周期更新，但比setTimeout更快
+                                            requestAnimationFrame(() => {
                                                 updatePreviewFromTask(taskId, primaryUrl, 'image', nodeIdToUse, imageUrls.length > 1 ? imageUrls : null);
-                                            }, 200); // 延迟执行，确保history已更新
+                                            });
                                             
                                             return { 
                                                 ...hItem, 
@@ -3641,19 +3695,20 @@
                                                 durationMs = endTime - (hItem.startTime || endTime);
                                             }
                                             
-                                            // 更新预览窗口（使用保存的sourceNodeId）
+                                            // 更新预览窗口（立即执行，不等待）
                                             // 即使savedSourceNodeId为空，也尝试调用updatePreviewFromTask，它会从history中查找
-                                            setTimeout(() => {
-                                                const nodeIdToUse = savedSourceNodeId || hItem.sourceNodeId;
-                                                console.log('[Async Image] 准备更新预览窗口（深度搜索）', { 
-                                                    taskId, 
-                                                    url: foundUrl, 
-                                                    sourceNodeId: nodeIdToUse,
-                                                    savedSourceNodeId,
-                                                    hItemSourceNodeId: hItem.sourceNodeId
-                                                });
+                                            const nodeIdToUse = savedSourceNodeId || hItem.sourceNodeId;
+                                            console.log('[Async Image] 准备更新预览窗口（深度搜索）', { 
+                                                taskId, 
+                                                url: foundUrl, 
+                                                sourceNodeId: nodeIdToUse,
+                                                savedSourceNodeId,
+                                                hItemSourceNodeId: hItem.sourceNodeId
+                                            });
+                                            // 使用requestAnimationFrame确保在下一个渲染周期更新，但比setTimeout更快
+                                            requestAnimationFrame(() => {
                                                 updatePreviewFromTask(taskId, foundUrl, 'image', nodeIdToUse, null);
-                                            }, 200); // 延迟执行，确保history已更新
+                                            });
                                             
                                             return { 
                                                 ...hItem, 
@@ -9155,35 +9210,56 @@
                                                                 : 'bg-zinc-100 hover:bg-zinc-200 text-zinc-600 border-zinc-300'
                                                         }`}
                                                     >
-                                                        {node.settings?.resolution || 'Auto'}
+                                                        {(() => {
+                                                            const currentModel = apiConfigs.find((m) => m.id === node.settings?.model);
+                                                            const modelId = currentModel?.id || currentModel?.modelName || '';
+                                                            const availableResolutions = getResolutionsForModel(modelId);
+                                                            const currentResolution = node.settings?.resolution || 'Auto';
+                                                            // 如果当前分辨率不在可用选项中，使用第一个可用选项作为显示值
+                                                            const displayResolution = availableResolutions.includes(currentResolution) 
+                                                                ? currentResolution 
+                                                                : (availableResolutions[0] || 'Auto');
+                                                            // 如果当前分辨率不在可用选项中，自动更新
+                                                            if (!availableResolutions.includes(currentResolution) && availableResolutions.length > 0) {
+                                                                setTimeout(() => {
+                                                                    updateNodeSettings(node.id, { resolution: availableResolutions[0] });
+                                                                }, 0);
+                                                            }
+                                                            return displayResolution;
+                                                        })()}
                                                     </button>
-                                                    {activeDropdown?.nodeId === node.id && activeDropdown.type === 'res' && (
-                                                        <div
-                                                            className={`absolute bottom-full right-0 mb-1 w-24 rounded-lg shadow-xl p-1 z-[60] border ${
-                                                                theme === 'dark'
-                                                                    ? 'bg-[#18181b] border-zinc-700'
-                                                                    : 'bg-white border-zinc-200'
-                                                            }`}
-                                                            onMouseDown={e => e.stopPropagation()}
-                                                        >
-                                                            {RESOLUTIONS.map(r => (
-                                                                <button
-                                                                    key={r}
-                                                                    onClick={() => {
-                                                                        updateNodeSettings(node.id, { resolution: r });
-                                                                        setActiveDropdown(null);
-                                                                    }}
-                                                                    className={`w-full text-center py-1 text-[10px] rounded ${
-                                                                        theme === 'dark'
-                                                                            ? 'text-zinc-300 hover:bg-zinc-800'
-                                                                            : 'text-zinc-700 hover:bg-zinc-100'
-                                                                    }`}
-                                                                >
-                                                                    {r}
-                                                                </button>
-                                                            ))}
-                                                        </div>
-                                                    )}
+                                                    {activeDropdown?.nodeId === node.id && activeDropdown.type === 'res' && (() => {
+                                                        const currentModel = apiConfigs.find((m) => m.id === node.settings?.model);
+                                                        const modelId = currentModel?.id || currentModel?.modelName || '';
+                                                        const availableResolutions = getResolutionsForModel(modelId);
+                                                        return (
+                                                            <div
+                                                                className={`absolute bottom-full right-0 mb-1 w-24 rounded-lg shadow-xl p-1 z-[60] border ${
+                                                                    theme === 'dark'
+                                                                        ? 'bg-[#18181b] border-zinc-700'
+                                                                        : 'bg-white border-zinc-200'
+                                                                }`}
+                                                                onMouseDown={e => e.stopPropagation()}
+                                                            >
+                                                                {availableResolutions.map(r => (
+                                                                    <button
+                                                                        key={r}
+                                                                        onClick={() => {
+                                                                            updateNodeSettings(node.id, { resolution: r });
+                                                                            setActiveDropdown(null);
+                                                                        }}
+                                                                        className={`w-full text-center py-1 text-[10px] rounded ${
+                                                                            theme === 'dark'
+                                                                                ? 'text-zinc-300 hover:bg-zinc-800'
+                                                                                : 'text-zinc-700 hover:bg-zinc-100'
+                                                                        }`}
+                                                                    >
+                                                                        {r}
+                                                                    </button>
+                                                                ))}
+                                                            </div>
+                                                        );
+                                                    })()}
                                                 </div>
                                             ) : (
                                                 (() => {
