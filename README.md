@@ -203,7 +203,7 @@
 <br>
 
 
-## 🚀 Tapnow Studio V2.5-3 更新日志-（2025-12-14）
+## 🚀 Tapnow Studio V2.5-4 更新日志-（2025-12-14）
 
 > **❤️ 特别致谢 / Special Thanks**
 > 感谢社区成员 **[@MrWhte-s](https://github.com/MrWhte-s)** 提供的方案。本次重点增加了蒙版重绘以及Sora2角色客串以及智能分镜表
