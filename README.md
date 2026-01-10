@@ -44,8 +44,7 @@
 
 > **以下信息来自原作者仓库，包含了项目的设计理念与基础功能说明。**
 
-<br>
-<br>
+---
 
 # 🎨 Tapnow Studio (Original Project)
 
