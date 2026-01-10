@@ -1,4 +1,4 @@
-# Tapnow Studio (Antigravity Custom Edition)
+# Tapnow-Studio-PP
 
 本项目是基于原始 Tapnow Studio 的深度定制与增强版本，旨在提供更稳定、更安全、更高效的 AI 绘图与视频创作体验。
 
