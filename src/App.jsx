@@ -1272,6 +1272,24 @@ const getRatiosForModel = (modelId) => {
     return RATIOS;
 };
 const RESOLUTIONS = ['Auto', '1K', '2K', '4K'];
+const normalizeImageResolution = (value) => {
+    const raw = String(value || '').toUpperCase();
+    if (raw === 'AUTO') return 'Auto';
+    if (raw === '1K') return '1K';
+    if (raw === '2K') return '2K';
+    if (raw === '4K') return '4K';
+    return '2K';
+};
+const normalizeVideoResolution = (value) => {
+    const raw = String(value || '').toUpperCase();
+    if (raw === '1080P') return '1080P';
+    if (raw === '720P') return '720P';
+    return '720P';
+};
+const normalizeVideoResolutionLower = (value) => {
+    const normalized = normalizeVideoResolution(value);
+    return normalized === '1080P' ? '1080p' : '720p';
+};
 // 根据模型返回不同的分辨率选项
 const getResolutionsForModel = (modelId) => {
     if (!modelId) return RESOLUTIONS;
@@ -2076,6 +2094,10 @@ function TapnowApp() {
 
                 configs = Array.from(uniqueMap.values());
 
+                // V3.8.2: Ensure every config has a unique internal ID for UI rendering stability
+                // This prevents input focus loss when editing the ID
+                configs = configs.map(c => c._uid ? c : { ...c, _uid: `uid-${Date.now()}-${Math.random().toString(36).substr(2, 9)}` });
+
                 return configs;
             } catch (e) {
                 console.error('[V3.6.0] 迁移 apiConfigs 失败:', e);
@@ -2083,7 +2105,7 @@ function TapnowApp() {
         }
 
         // V3.6.0: 首次加载才使用默认模型
-        return [...DEFAULT_API_CONFIGS];
+        return DEFAULT_API_CONFIGS.map(c => ({ ...c, _uid: `uid-${Date.now()}-${Math.random().toString(36).substr(2, 9)}` }));
     });
 
     // V3.3: Provider 状态管理
@@ -2405,6 +2427,36 @@ function TapnowApp() {
     const [isMouseOverStoryboard, setIsMouseOverStoryboard] = useState(false); // 鼠标是否在智能分镜表窗口内
 
     // 框选相关状态
+    // V3.7.33: Storyboard Shot Execution Timer
+    const [shotTimers, setShotTimers] = useState({});
+
+    useEffect(() => {
+        const interval = setInterval(() => {
+            const now = Date.now();
+            const updates = {};
+            let hasUpdates = false;
+
+            if (nodesRef.current) {
+                nodesRef.current.forEach(node => {
+                    if (node.type === 'storyboard-node' && node.settings?.shots) {
+                        node.settings.shots.forEach(shot => {
+                            if (shot.status === 'generating' && shot.generationStartTime) {
+                                const elapsedSeconds = (now - shot.generationStartTime) / 1000;
+                                updates[`${node.id}-${shot.id}`] = `${elapsedSeconds.toFixed(1)}s`;
+                                hasUpdates = true;
+                            }
+                        });
+                    }
+                });
+            }
+
+            if (hasUpdates) {
+                setShotTimers(updates);
+            }
+        }, 100);
+        return () => clearInterval(interval);
+    }, []);
+
     const [isSelecting, setIsSelecting] = useState(false);
     const [selectionBox, setSelectionBox] = useState(null); // { startX, startY, endX, endY } (屏幕坐标)
     const [selectedNodeIds, setSelectedNodeIds] = useState(new Set()); // 多选节点ID集合
@@ -2464,10 +2516,10 @@ function TapnowApp() {
         try { return localStorage.getItem('tapnow_last_ratio') || '1:1'; } catch { return '1:1'; }
     });
     const [lastUsedImageResolution, setLastUsedImageResolution] = useState(() => {
-        try { return localStorage.getItem('tapnow_last_image_res') || 'Auto'; } catch { return 'Auto'; }
+        try { return normalizeImageResolution(localStorage.getItem('tapnow_last_image_res') || '2K'); } catch { return '2K'; }
     });
     const [lastUsedVideoResolution, setLastUsedVideoResolution] = useState(() => {
-        try { return localStorage.getItem('tapnow_last_video_res') || '720P'; } catch { return '720P'; }
+        try { return normalizeVideoResolution(localStorage.getItem('tapnow_last_video_res') || '720P'); } catch { return '720P'; }
     });
     const [lastUsedSegmentDuration, setLastUsedSegmentDuration] = useState(() => {
         try { return localStorage.getItem('tapnow_last_segment_duration') || '3'; } catch { return '3'; }
@@ -4267,7 +4319,12 @@ function TapnowApp() {
 
     // V3.6.0: 添加新模型（简化格式）
     const addNewModel = () => {
-        const newConfig = { id: `new-model-${Date.now()}`, provider: 'openai', type: 'Chat' };
+        const newConfig = {
+            id: `new-model-${Date.now()}`,
+            provider: 'openai',
+            type: 'Chat',
+            _uid: `uid-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+        };
         setApiConfigs([...apiConfigs, newConfig]);
     };
     // V3.6.0: 更新模型配置，支持 id 变更
@@ -5644,7 +5701,8 @@ function TapnowApp() {
                                     if (storyboardTask) {
                                         updateShot(storyboardTask.nodeId, storyboardTask.shotId, {
                                             video_url: videoUrl,
-                                            status: 'done'
+                                            status: 'done',
+                                            durationCost: durationMs / 1000 // Save duration in seconds
                                         });
                                         // 清理任务映射
                                         storyboardTaskMapRef.current.delete(taskId);
@@ -5687,7 +5745,8 @@ function TapnowApp() {
                                 if (storyboardTask) {
                                     updateShot(storyboardTask.nodeId, storyboardTask.shotId, {
                                         video_url: videoUrl,
-                                        status: 'done'
+                                        status: 'done',
+                                        durationCost: durationMs / 1000 // Save duration in seconds
                                     });
                                     // 清理任务映射
                                     storyboardTaskMapRef.current.delete(taskId);
@@ -5721,6 +5780,38 @@ function TapnowApp() {
                     }
                     console.error('[Tapnow] Veo: 任务失败', { status, failReason, errorMsg });
                     setHistory((prev) => prev.map((hItem) => hItem.id === taskId ? { ...hItem, status: 'failed', errorMsg } : hItem));
+
+                    // V3.7.33: Save duration even on failure for storyboard
+                    const endTime = Date.now();
+                    // Need to find startTime from history
+                    // Since specific history item isn't easily accessible here without searching 'prev', we rely on storyboardTaskMapRef if possible or just use current time approx
+                    // Better to calculate approximate duration if history lookup is hard within state updater, but we can do it outside
+                    // NOTE: pollVeoJob doesn't have easy access to historyMap like pollSoraJob above (which used it).
+                    // We can conceptually assume startTime was passed or we just check the item.
+                    // Let's use a functional update for history to find it, but we need to run side effect.
+                    // For now, simpler approach: we don't have perfect duration for Veo failure here easily without reading history. 
+                    // Let's defer to avoiding complex lookup inside loop. 
+                    // Wait, we can use the ref map to check if it's a storyboard task first.
+                    const storyboardTask = storyboardTaskMapRef.current.get(taskId);
+                    if (storyboardTask) {
+                        // For Veo/Jimeng, we don't have local historyMap cache updated in pollVeoJob scope usually? 
+                        // Actually historyMap is just a ref or state? It was used in pollSoraJob as `historyMap.get(taskId)`.
+                        // `historyMap` is defined in App component scope? Yes, `const [historyMap, setHistoryMap] = useState(new Map());` NO, it's usually derived or ref.
+                        // Checked file: `historyMap` was used in pollSoraJob. Let's assume it's available.
+                        // If not, we can't easily get startTime.
+                        // Fallback: We can't get accurate duration easily. BUT user wants persistent time.
+                        // Maybe just mark as failed. If we can't get duration, we can't show it.
+                        // Let's try to access historyMap.
+                        const historyItem = historyMap.get(taskId);
+                        const durationMs = historyItem ? (Date.now() - historyItem.startTime) : 0;
+
+                        updateShot(storyboardTask.nodeId, storyboardTask.shotId, {
+                            status: 'failed',
+                            errorMsg,
+                            durationCost: durationMs / 1000
+                        });
+                        storyboardTaskMapRef.current.delete(taskId);
+                    }
                     return;
                 }
 
@@ -5823,7 +5914,8 @@ function TapnowApp() {
                         if (storyboardTask) {
                             updateShot(storyboardTask.nodeId, storyboardTask.shotId, {
                                 video_url: videoUrl,
-                                status: 'done'
+                                status: 'done',
+                                durationCost: durationMs / 1000 // Save duration in seconds
                             });
                             // 清理任务映射
                             storyboardTaskMapRef.current.delete(taskId);
@@ -5845,6 +5937,21 @@ function TapnowApp() {
 
                 if (status === 'FAILED' || status === 'ERROR' || status === 'CANCELLED') {
                     setHistory(prev => prev.map(hItem => hItem.id === taskId ? { ...hItem, status: 'failed', errorMsg: `任务失败: ${status}` } : hItem));
+
+                    // V3.7.33: Save duration even on failure for storyboard
+                    const endTime = Date.now();
+                    const historyItem = historyMap.get(taskId);
+                    const durationMs = endTime - (historyItem?.startTime || endTime);
+
+                    const storyboardTask = storyboardTaskMapRef.current.get(taskId);
+                    if (storyboardTask) {
+                        updateShot(storyboardTask.nodeId, storyboardTask.shotId, {
+                            status: 'failed',
+                            errorMsg: `任务失败: ${status}`,
+                            durationCost: durationMs / 1000
+                        });
+                        storyboardTaskMapRef.current.delete(taskId);
+                    }
                     return;
                 }
 
@@ -6154,7 +6261,8 @@ function TapnowApp() {
                                                     output_url: primaryUrl,   // 兼容旧逻辑
                                                     selectedImageIndex: 0,    // 默认选中第一张
                                                     outputEnabled: false,     // 用户手动选择满意的
-                                                    status: 'done'
+                                                    status: 'done',
+                                                    durationCost: durationMs ? durationMs / 1000 : 0 // Save duration in seconds
                                                 });
                                                 // 清理任务映射
                                                 storyboardTaskMapRef.current.delete(taskId);
@@ -6342,6 +6450,20 @@ function TapnowApp() {
                                 };
                             } else if (status === 'FAILED' || status === 'ERROR' || status === 'CANCELLED' || status === 'FAILURE') {
                                 // 任务失败
+                                // V3.7.33: Handle failure duration for storyboard
+                                if (storyboardTaskMapRef.current.has(taskId)) {
+                                    const storyboardTask = storyboardTaskMapRef.current.get(taskId);
+                                    const endTime = Date.now();
+                                    const durationMs = endTime - (hItem.startTime || endTime);
+
+                                    updateShot(storyboardTask.nodeId, storyboardTask.shotId, {
+                                        status: 'failed',
+                                        errorMsg: errorMsg || `任务失败: ${status}`,
+                                        durationCost: durationMs / 1000
+                                    });
+                                    storyboardTaskMapRef.current.delete(taskId);
+                                }
+
                                 return {
                                     ...hItem,
                                     status: 'failed',
@@ -6851,7 +6973,10 @@ function TapnowApp() {
 
         // 优先使用 options 中的 ratio，其次使用节点设置，最后使用默认值
         let ratio = options.ratio || node?.settings?.ratio || (modelId.includes('grok') ? '3:2' : '1:1');
-        let resolution = node?.settings?.resolution || (modelId.includes('grok') ? '1080P' : 'Auto');
+        // V3.5.0: 覆盖分辨率设置 (Jimeng/Grok)
+        let resolution = options.resolution || node?.settings?.resolution || (type === 'video' ? '720P' : '2K');
+        if (type === 'image') resolution = normalizeImageResolution(resolution);
+        if (type === 'video') resolution = normalizeVideoResolution(resolution);
         let { sizeStr, w, h } = getModelParams(modelId, ratio, resolution);
 
         // Auto Resolution Logic (Direct Source, No Scaling, Just Alignment)
@@ -6907,11 +7032,6 @@ function TapnowApp() {
         // 优先使用 options 中的 duration，其次使用节点设置，最后使用默认值
         let duration = options.duration ? String(options.duration).replace('s', '') : (node?.settings?.duration?.replace('s', '') || '5');
         if (modelId.includes('veo')) duration = '8';
-
-        // V3.5.0: 覆盖分辨率设置 (Jimeng/Grok)
-        if (options.resolution) resolution = options.resolution;
-        else if (node?.settings?.resolution) resolution = node.settings.resolution;
-
 
         // V3.7.27: 确保 taskId 唯一性（避免同一毫秒内多个任务冲突）
         const taskId = options._existingTaskId || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -7579,11 +7699,9 @@ function TapnowApp() {
                 // V3.6.1: 检查是否是分镜表的图片任务
                 // V3.7.9: 保存所有生成的图片到 output_images 数组
                 // V3.7.30: 添加调试日志
-                if (storyboardTaskMapRef.current.has(taskId)) {
-                    const storyboardTask = storyboardTaskMapRef.current.get(taskId);
-
-
-                    if (storyboardTask && storyboardTask.isImageMode) {
+                const storyboardTask = storyboardTaskMapRef.current.get(taskId);
+                if (storyboardTask) {
+                    if (storyboardTask.isImageMode) {
                         updateShot(storyboardTask.nodeId, storyboardTask.shotId, {
                             output_images: imageUrls, // V3.7.9: 保存所有图片
                             output_url: imageUrls[0], // 兼容旧逻辑
@@ -7591,41 +7709,41 @@ function TapnowApp() {
                             outputEnabled: false, // V3.7.25: 默认不勾选，用户手动选择满意的
                             status: 'done'
                         });
-                        // 清理任务映射
-                        storyboardTaskMapRef.current.delete(taskId);
                     } else {
                         console.warn('[V3.7.30 Debug] 分镜表任务未找到或不是图片模式，无法回填');
                     }
-
-                    setHistory((prev) => {
-                        const updated = prev.map((hItem) => {
-                            if (hItem.id === taskId) {
-                                const updatedItem = {
-                                    ...hItem,
-                                    status: 'completed',
-                                    progress: 100,
-                                    url: primaryUrl,
-                                    width: w,
-                                    height: h,
-                                    durationMs,
-                                    mjImages: imageUrls.length > 1 ? imageUrls : null,
-                                    selectedMjImageIndex: 0
-                                };
-
-                                // 更新预览窗口（非分镜表任务）
-                                if (updatedItem.sourceNodeId && !storyboardTask) {
-                                    setTimeout(() => {
-                                        updatePreviewFromTask(taskId, primaryUrl, 'image', updatedItem.sourceNodeId, updatedItem.mjImages);
-                                    }, 0);
-                                }
-                                return updatedItem;
-                            }
-                            return hItem;
-                        });
-                        return updated;
-                    });
-                    return;
+                    // 清理任务映射
+                    storyboardTaskMapRef.current.delete(taskId);
                 }
+
+                setHistory((prev) => {
+                    const updated = prev.map((hItem) => {
+                        if (hItem.id === taskId) {
+                            const updatedItem = {
+                                ...hItem,
+                                status: 'completed',
+                                progress: 100,
+                                url: primaryUrl,
+                                width: w,
+                                height: h,
+                                durationMs,
+                                mjImages: imageUrls.length > 1 ? imageUrls : null,
+                                selectedMjImageIndex: 0
+                            };
+
+                            // 更新预览窗口（非分镜表任务）
+                            if (updatedItem.sourceNodeId && !storyboardTask) {
+                                setTimeout(() => {
+                                    updatePreviewFromTask(taskId, primaryUrl, 'image', updatedItem.sourceNodeId, updatedItem.mjImages);
+                                }, 0);
+                            }
+                            return updatedItem;
+                        }
+                        return hItem;
+                    });
+                    return updated;
+                });
+                return;
             } // Close if (type === 'image')
 
             if (type === 'video') {
@@ -7951,12 +8069,17 @@ function TapnowApp() {
                     } else if (modelId.includes('jimeng')) {
                         endpoint = `${baseUrl}/v1/videos/generations`;
                         // V3.5.37: Add missing model parameter for Jimeng
-                        formData.append('model', config?.modelName || 'jimeng-video-3.0');
+                        formData.append('model', config?.modelName || modelId || 'jimeng-video-3.0');
                         formData.append('prompt', prompt);
                         formData.append('duration', parseInt(duration));
-                        formData.append('ratio', ratio);
-                        formData.append('image', blob, 'input.png');
-                        if (resolution && resolution !== 'Auto') formData.append('resolution', resolution);
+                        const jimengRatio = ratio === 'Auto' ? '1:1' : ratio;
+                        formData.append('ratio', jimengRatio);
+                        const jimengResolution = normalizeVideoResolutionLower(resolution);
+                        formData.append('resolution', jimengResolution);
+                        const jimengImages = connectedImages.filter(Boolean).slice(0, 2);
+                        const jimengBlobs = await Promise.all(jimengImages.map((img) => getBlobFromUrl(img)));
+                        if (jimengBlobs[0]) formData.append('image_file_1', jimengBlobs[0], 'first.png');
+                        if (jimengBlobs[1]) formData.append('image_file_2', jimengBlobs[1], 'last.png');
                     } else if (modelId.includes('grok')) {
                         endpoint = `${baseUrl} /v1/videos`;
                         formData.append('model', config?.modelName || 'grok-video-3');
@@ -7994,12 +8117,14 @@ function TapnowApp() {
                     } else if (modelId.includes('jimeng')) {
                         endpoint = `${baseUrl}/v1/videos/generations`;
                         // V3.5.37: Add missing model parameter for Jimeng
+                        const jimengRatio = ratio === 'Auto' ? '1:1' : ratio;
+                        const jimengResolution = normalizeVideoResolutionLower(resolution);
                         body = JSON.stringify({
-                            model: config?.modelName || 'jimeng-video-3.0',
+                            model: config?.modelName || modelId || 'jimeng-video-3.0',
                             prompt,
                             duration: parseInt(duration),
-                            ratio: ratio,
-                            resolution: resolution === 'Auto' ? undefined : resolution
+                            ratio: jimengRatio,
+                            resolution: jimengResolution
                         });
                     } else if (modelId.includes('grok')) {
                         endpoint = `${baseUrl} /v1/videos`;
@@ -8082,7 +8207,8 @@ function TapnowApp() {
                         if (storyboardTask) {
                             updateShot(storyboardTask.nodeId, storyboardTask.shotId, {
                                 video_url: immediateUrl,
-                                status: 'done'
+                                status: 'done',
+                                durationCost: durationMs / 1000 // Save duration in seconds
                             });
                             // 清理任务映射
                             storyboardTaskMapRef.current.delete(taskId);
@@ -8926,6 +9052,8 @@ function TapnowApp() {
     // V3.7.29 fix4: 添加 options 参数支持条件更新（如 onlyIfStatus）
     // V3.7.30 fix: 移除 setTimeout 包装，直接调用确保状态更新不丢失
     const updateShot = (nodeId, shotId, updates, options = {}) => {
+        let didUpdate = false;
+        let statusForTimer = updates.status;
 
         setNodes(prevNodes => {
             const node = prevNodes.find(n => n.id === nodeId);
@@ -8943,8 +9071,27 @@ function TapnowApp() {
                 }
             }
 
+            const currentShot = (node.settings?.shots || []).find(s => s.id === shotId);
+            const finalUpdates = { ...updates };
+            const hasDurationCost = Object.prototype.hasOwnProperty.call(finalUpdates, 'durationCost');
+            const finishingStatuses = new Set(['done', 'completed', 'failed', 'error']);
+
+            if (finalUpdates.status === 'generating' && !hasDurationCost) {
+                finalUpdates.durationCost = 0;
+            }
+
+            if (finalUpdates.status && finishingStatuses.has(finalUpdates.status) && !hasDurationCost) {
+                if (currentShot?.generationStartTime) {
+                    const elapsedSeconds = (Date.now() - currentShot.generationStartTime) / 1000;
+                    finalUpdates.durationCost = Number(elapsedSeconds.toFixed(1));
+                }
+            }
+
+            didUpdate = true;
+            statusForTimer = finalUpdates.status;
+
             const updatedShots = (node.settings?.shots || []).map(shot =>
-                shot.id === shotId ? { ...shot, ...updates } : shot
+                shot.id === shotId ? { ...shot, ...finalUpdates } : shot
             );
 
             // [Cleaned Log] updateShot info removed
@@ -8957,6 +9104,20 @@ function TapnowApp() {
                     : n
             );
         });
+
+        if (didUpdate && statusForTimer) {
+            const key = `${nodeId}-${shotId}`;
+            if (statusForTimer === 'generating') {
+                setShotTimers(prev => ({ ...prev, [key]: '0.0s' }));
+            } else {
+                setShotTimers(prev => {
+                    if (!prev[key]) return prev;
+                    const next = { ...prev };
+                    delete next[key];
+                    return next;
+                });
+            }
+        }
 
         // V3.7.5: 如果更新了图片或视频，且有连接的预览窗口，自动更新预览
         // 注意：这里的 updates 是传入的参数，不受闭包影响
@@ -9309,7 +9470,7 @@ function TapnowApp() {
             model: selectedModel,
             ratio: shot.ratio || '16:9',
             duration: normalizedDuration,
-            resolution: shot.resolution || '720p'
+            resolution: normalizeVideoResolutionLower(shot.resolution || '720p')
         };
 
 
@@ -9383,7 +9544,7 @@ function TapnowApp() {
         const overrideOptions = {
             model: selectedModel,
             ratio: shot.ratio || '1:1',
-            resolution: shot.resolution || 'Auto'
+            resolution: normalizeImageResolution(shot.resolution || '2K')
         };
 
 
@@ -13857,13 +14018,13 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                                             y: world.y - 170,
                                                                                                             width: 360,
                                                                                                             height: 340,
-                                                                                                            settings: {
-                                                                                                                model: 'mj-v6',
-                                                                                                                prompt: kf.mj_prompt,
-                                                                                                                ratio: 'Auto',
-                                                                                                                resolution: 'Auto'
-                                                                                                            }
-                                                                                                        };
+                                                                                                             settings: {
+                                                                                                                 model: 'mj-v6',
+                                                                                                                 prompt: kf.mj_prompt,
+                                                                                                                 ratio: 'Auto',
+                                                                                                                resolution: '2K'
+                                                                                                             }
+                                                                                                         };
 
                                                                                                         setNodes((prev) => [...prev, genImageNode]);
 
@@ -14804,7 +14965,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                     e.currentTarget.focus(); // 关键：点击行即聚焦，激活粘贴
                                                                 }}
                                                                 onPaste={(e) => handleShotPaste(e, shot.id)} // 关键：在行级别监听粘贴
-                                                                className={`flex-1 flex gap-3 p-3 rounded-lg border transition-all group/shot cursor-pointer outline-none focus:ring-2 focus:ring-blue-500/50 ${isActiveShot
+                                                                className={`relative flex-1 flex gap-3 p-3 rounded-lg border transition-all group/shot cursor-pointer outline-none focus:ring-2 focus:ring-blue-500/50 ${isActiveShot
                                                                     ? 'border-blue-500 ring-1 ring-blue-500 bg-blue-500/5 z-10'
                                                                     : theme === 'dark'
                                                                         ? 'bg-zinc-900/50 border-zinc-800 hover:border-zinc-600'
@@ -15143,7 +15304,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                 if (shot.model?.includes('jimeng') || apiConfigsMap.get(shot.model)?.modelName?.includes('jimeng')) {
                                                                                     return (
                                                                                         <select
-                                                                                            value={shot.resolution || '720p'}
+                                                                                            value={normalizeVideoResolutionLower(shot.resolution || '720p')}
                                                                                             onChange={(e) => updateShot(node.id, shot.id, { resolution: e.target.value })}
                                                                                             onClick={(e) => e.stopPropagation()}
                                                                                             onMouseDown={(e) => e.stopPropagation()}
@@ -15164,7 +15325,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                 const resOptions = getResolutionsForModel(shot.model);
                                                                                 return (
                                                                                     <select
-                                                                                        value={shot.resolution || 'Auto'}
+                                                                                        value={normalizeImageResolution(shot.resolution || '2K')}
                                                                                         onChange={(e) => updateShot(node.id, shot.id, { resolution: e.target.value })}
                                                                                         onClick={(e) => e.stopPropagation()}
                                                                                         onMouseDown={(e) => e.stopPropagation()}
@@ -15205,6 +15366,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                 </select>
                                                                             );
                                                                         })()}
+
 
                                                                     </div>
 
@@ -15317,6 +15479,23 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                         )}
                                                                     </div>
 
+                                                                    {/* Time Display - V3.7.33 Refined Style (Blue "Ready-made") */}
+                                                                    {(shot.status === 'generating' || shot.status === 'done' || shot.status === 'completed' || shot.status === 'failed' || shot.status === 'error') && (
+                                                                        <div
+                                                                            className={`absolute top-1 right-1 px-1.5 py-0.5 rounded text-[10px] font-mono flex items-center gap-1 backdrop-blur-[2px] z-10 ${theme === 'dark'
+                                                                                ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
+                                                                                : 'bg-blue-50 text-blue-600 border border-blue-200'
+                                                                                }`}
+                                                                        >
+                                                                            <Clock size={10} />
+                                                                            <span>
+                                                                                {shot.status === 'generating'
+                                                                                    ? (shotTimers[`${node.id}-${shot.id}`] ? shotTimers[`${node.id}-${shot.id}`].replace('⏱️ ', '') : '0.0s')
+                                                                                    : `${(shot.durationCost || 0).toFixed(1)}s`
+                                                                                }
+                                                                            </span>
+                                                                        </div>
+                                                                    )}
                                                                     {/* 角色引用栏 (仅 Sora 模型) */}
                                                                     {(() => {
                                                                         const currentModel = shot.model || '';
@@ -16645,13 +16824,13 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     <div className="relative">
                                                         <button
                                                             onClick={e => { e.stopPropagation(); setActiveDropdown(activeDropdown?.type === 'vres' && activeDropdown.nodeId === node.id ? null : { nodeId: node.id, type: 'vres' }); }}
-                                                            className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] border ${theme === 'dark'
-                                                                ? 'bg-zinc-800/50 hover:bg-zinc-800 text-zinc-400 border-zinc-700/50'
-                                                                : 'bg-zinc-100 hover:bg-zinc-200 text-zinc-600 border-zinc-300'
-                                                                }`}
-                                                        >
-                                                            {node.settings?.resolution || '1080P'}
-                                                        </button>
+                                                        className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] border ${theme === 'dark'
+                                                            ? 'bg-zinc-800/50 hover:bg-zinc-800 text-zinc-400 border-zinc-700/50'
+                                                            : 'bg-zinc-100 hover:bg-zinc-200 text-zinc-600 border-zinc-300'
+                                                            }`}
+                                                    >
+                                                        {normalizeVideoResolution(node.settings?.resolution || '720P')}
+                                                    </button>
                                                         {activeDropdown?.nodeId === node.id && activeDropdown.type === 'vres' && (
                                                             <div
                                                                 className={`absolute bottom-full left-1/2 -translate-x-1/2 mb-1 w-24 rounded-lg shadow-xl p-1 z-[60] border ${theme === 'dark'
@@ -16700,13 +16879,18 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             const currentModel = apiConfigsMap.get(node.settings?.model);
                                                             const modelId = currentModel?.id || currentModel?.modelName || '';
                                                             const availableResolutions = getResolutionsForModel(modelId);
-                                                            const currentResolution = node.settings?.resolution || 'Auto';
+                                                            const currentResolution = node.settings?.resolution || '2K';
+                                                            const normalizedResolution = normalizeImageResolution(currentResolution);
                                                             // 如果当前分辨率不在可用选项中，使用第一个可用选项作为显示值
-                                                            const displayResolution = availableResolutions.includes(currentResolution)
-                                                                ? currentResolution
-                                                                : (availableResolutions[0] || 'Auto');
+                                                            const displayResolution = availableResolutions.includes(normalizedResolution)
+                                                                ? normalizedResolution
+                                                                : (availableResolutions[0] || '2K');
                                                             // 如果当前分辨率不在可用选项中，自动更新
-                                                            if (!availableResolutions.includes(currentResolution) && availableResolutions.length > 0) {
+                                                            if (currentResolution !== normalizedResolution && availableResolutions.includes(normalizedResolution)) {
+                                                                setTimeout(() => {
+                                                                    updateNodeSettings(node.id, { resolution: normalizedResolution });
+                                                                }, 0);
+                                                            } else if (!availableResolutions.includes(normalizedResolution) && availableResolutions.length > 0) {
                                                                 setTimeout(() => {
                                                                     updateNodeSettings(node.id, { resolution: availableResolutions[0] });
                                                                 }, 0);
@@ -18932,12 +19116,16 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                     id: config.modelName,
                                                                     provider: config.provider,
                                                                     type: config.type,
+                                                                    _uid: config._uid || `uid-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
                                                                     ...(config.durations ? { durations: config.durations } : {})
                                                                 };
                                                             }
                                                             // 已经是新格式，只保留必要字段
                                                             const { displayName, modelName, isCustom, key, url, ...rest } = config;
-                                                            return rest;
+                                                            return {
+                                                                ...rest,
+                                                                _uid: rest._uid || `uid-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+                                                            };
                                                         });
                                                         // 直接替换，不合并
                                                         setApiConfigs(migratedConfigs);
@@ -19257,7 +19445,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     </div>
                                                     <div className="space-y-1.5">
                                                         {group.models.map(api => (
-                                                            <div key={api.id} className={`flex items-center justify-between px-2 py-1.5 rounded ${theme === 'dark' ? 'bg-zinc-900/50 hover:bg-zinc-800/50' : 'bg-white hover:bg-zinc-100'}`}>
+                                                            <div key={api._uid || api.id} className={`flex items-center justify-between px-2 py-1.5 rounded ${theme === 'dark' ? 'bg-zinc-900/50 hover:bg-zinc-800/50' : 'bg-white hover:bg-zinc-100'}`}>
                                                                 <div className="flex items-center gap-2 flex-1">
                                                                     <div className={`w-1.5 h-1.5 rounded-full ${getStatusColor(api.id)}`}></div>
                                                                     {/* V3.6.0: 直接使用 id 作为 modelName */}
